@@ -1,6 +1,5 @@
 import os
 import time
-import json
 import datetime
 import requests
 from groq import Groq
@@ -9,8 +8,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 
 TOKEN = os.environ.get("NEXUS_TOKEN")
 GROQ_KEY = os.environ.get("GROQ_KEY")
-SEARCH_KEY = os.environ.get("SEARCH_KEY")
-SEARCH_CX = os.environ.get("SEARCH_CX")
 client = Groq(api_key=GROQ_KEY)
 
 user_histories = {}
@@ -28,7 +25,7 @@ TOPICS = {
     "gaming": {"emoji": "🎮", "label": "Gaming", "prompt": "You are a gaming expert. Discuss games, strategies, reviews, esports, game recommendations and gaming news with passion."},
     "finance": {"emoji": "💰", "label": "Money & Finance", "prompt": "You are a friendly finance advisor. Explain investing, saving, crypto, budgeting and money tips in a simple understandable way."},
     "motivation": {"emoji": "🔥", "label": "Motivation", "prompt": "You are an energetic life coach and motivator. Inspire people, give life advice, help with mindset, confidence and achieving goals."},
-    "websearch": {"emoji": "🌐", "label": "Web Search", "prompt": "You are a helpful assistant. Use the web search results provided to answer questions accurately with latest information."}
+    "websearch": {"emoji": "🌐", "label": "Web Search", "prompt": "You are a helpful assistant. Use the web search results provided to answer questions accurately with latest real-time information. Always summarize the results clearly."}
 }
 
 def init_user_stats(user_id, name):
@@ -60,15 +57,21 @@ def get_favourite_topic(user_id):
 
 def web_search(query):
     try:
-        url = "https://www.googleapis.com/customsearch/v1"
-        params = {"key": SEARCH_KEY, "cx": SEARCH_CX, "q": query, "num": 3}
-        res = requests.get(url, params=params, timeout=10)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        params = {"q": query, "format": "json", "no_html": 1, "skip_disambig": 1}
+        res = requests.get("https://api.duckduckgo.com/", params=params, headers=headers, timeout=10)
         data = res.json()
         results = []
-        for item in data.get("items", []):
-            results.append(f"• {item['title']}: {item['snippet']}")
-        return "\n".join(results) if results else None
-    except:
+        if data.get("AbstractText"):
+            results.append(data["AbstractText"])
+        for topic in data.get("RelatedTopics", [])[:3]:
+            if "Text" in topic:
+                results.append(topic["Text"])
+        if results:
+            return "\n\n".join(results[:3])
+        return None
+    except Exception as e:
+        print(f"Search error: {e}")
         return None
 
 def get_main_menu():
@@ -119,7 +122,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     init_user_stats(user_id, user.first_name)
     data = query.data
-
     if data == "menu":
         user_topics.pop(user_id, None)
         user_histories.pop(user_id, None)
@@ -129,7 +131,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_main_menu()
         )
         return
-
     if data == "stats":
         stats = user_stats.get(user_id, {})
         total = stats.get("total_messages", 0)
@@ -151,17 +152,13 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
         return
-
     if data in TOPICS:
         user_topics[user_id] = data
         user_histories[user_id] = []
         topic = TOPICS[data]
-        extra = ""
-        if data == "websearch":
-            extra = "Type anything to search the web for latest results!\n\n"
         await query.message.reply_text(
             f"{topic['emoji']} *{topic['label']} Mode ON!*\n\n"
-            f"{extra}Ask me anything about *{topic['label']}*!\n"
+            f"Ask me anything about *{topic['label']}*!\n"
             f"Type your question below 👇\n\n"
             f"_Tap 🏠 Main Menu anytime to switch topic_",
             parse_mode="Markdown",
@@ -175,35 +172,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     text = update.message.text
     init_user_stats(user_id, user.first_name)
-
     if user_id not in user_topics:
         await update.message.reply_text(
             "👇 Please pick a topic first!",
             reply_markup=get_main_menu()
         )
         return
-
     topic_key = user_topics[user_id]
     topic = TOPICS[topic_key]
-
     if user_id not in user_histories:
         user_histories[user_id] = []
-
     update_stats(user_id, topic_key)
     await update.message.chat.send_action("typing")
-
     if topic_key == "websearch":
         search_results = web_search(text)
         if search_results:
-            enhanced_prompt = f"User asked: {text}\n\nWeb search results:\n{search_results}\n\nAnswer based on these results."
+            enhanced = f"User asked: {text}\n\nWeb results:\n{search_results}\n\nAnswer based on these results clearly."
         else:
-            enhanced_prompt = text
-        user_histories[user_id].append({"role": "user", "content": enhanced_prompt})
+            enhanced = text
+        user_histories[user_id].append({"role": "user", "content": enhanced})
     else:
         user_histories[user_id].append({"role": "user", "content": text})
-
     reply = ask_groq(topic, user_histories[user_id])
-
     if reply:
         user_histories[user_id].append({"role": "assistant", "content": reply})
         await update.message.reply_text(
