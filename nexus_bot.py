@@ -2,6 +2,7 @@ import os
 import time
 import datetime
 import requests
+import feedparser
 from groq import Groq
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
@@ -14,6 +15,14 @@ user_histories = {}
 user_topics = {}
 user_stats = {}
 
+NEWS_FEEDS = {
+    "india": ("🇮🇳 India News", "https://feeds.feedburner.com/ndtvnews-india-news"),
+    "world": ("🌍 World News", "https://feeds.feedburner.com/ndtvnews-world-news"),
+    "sports_news": ("🏆 Sports News", "https://feeds.feedburner.com/ndtvnews-sports"),
+    "tech_news": ("💻 Tech News", "https://feeds.feedburner.com/ndtvnews-tech"),
+    "bbc": ("🇬🇧 BBC News", "http://feeds.bbci.co.uk/news/rss.xml")
+}
+
 TOPICS = {
     "anime": {"emoji": "⛩️", "label": "Anime", "prompt": "You are an expert anime advisor. Suggest the best anime, explain plots, recommend based on preferences, discuss characters and storylines. Always be enthusiastic and detailed about anime."},
     "entertainment": {"emoji": "🎬", "label": "Entertainment", "prompt": "You are an entertainment expert covering movies, TV shows, music, celebrities, memes and pop culture. Give exciting recommendations and discuss trends."},
@@ -25,7 +34,8 @@ TOPICS = {
     "gaming": {"emoji": "🎮", "label": "Gaming", "prompt": "You are a gaming expert. Discuss games, strategies, reviews, esports, game recommendations and gaming news with passion."},
     "finance": {"emoji": "💰", "label": "Money & Finance", "prompt": "You are a friendly finance advisor. Explain investing, saving, crypto, budgeting and money tips in a simple understandable way."},
     "motivation": {"emoji": "🔥", "label": "Motivation", "prompt": "You are an energetic life coach and motivator. Inspire people, give life advice, help with mindset, confidence and achieving goals."},
-    "websearch": {"emoji": "🌐", "label": "Web Search", "prompt": "You are a helpful assistant. Use the web search results provided to answer questions accurately with latest real-time information. Always summarize the results clearly."}
+    "websearch": {"emoji": "🌐", "label": "Web Search", "prompt": "You are a helpful assistant. Answer questions accurately and helpfully."},
+    "news": {"emoji": "📰", "label": "Live News", "prompt": "You are a news assistant."}
 }
 
 def init_user_stats(user_id, name):
@@ -55,24 +65,29 @@ def get_favourite_topic(user_id):
     fav = max(topics, key=topics.get)
     return f"{TOPICS[fav]['emoji']} {TOPICS[fav]['label']}"
 
-def web_search(query):
+def get_news(feed_url, count=5):
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        params = {"q": query, "format": "json", "no_html": 1, "skip_disambig": 1}
-        res = requests.get("https://api.duckduckgo.com/", params=params, headers=headers, timeout=10)
-        data = res.json()
-        results = []
-        if data.get("AbstractText"):
-            results.append(data["AbstractText"])
-        for topic in data.get("RelatedTopics", [])[:3]:
-            if "Text" in topic:
-                results.append(topic["Text"])
-        if results:
-            return "\n\n".join(results[:3])
+        feed = feedparser.parse(feed_url)
+        headlines = []
+        for entry in feed.entries[:count]:
+            headlines.append(f"• {entry.title}")
+        return "\n".join(headlines) if headlines else None
+    except:
         return None
-    except Exception as e:
-        print(f"Search error: {e}")
-        return None
+
+def get_news_menu():
+    keyboard = []
+    items = list(NEWS_FEEDS.items())
+    for i in range(0, len(items), 2):
+        row = []
+        key1, val1 = items[i]
+        row.append(InlineKeyboardButton(val1[0], callback_data=f"news_{key1}"))
+        if i + 1 < len(items):
+            key2, val2 = items[i+1]
+            row.append(InlineKeyboardButton(val2[0], callback_data=f"news_{key2}"))
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("🏠 Main Menu", callback_data="menu")])
+    return InlineKeyboardMarkup(keyboard)
 
 def get_main_menu():
     keyboard = []
@@ -122,6 +137,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
     init_user_stats(user_id, user.first_name)
     data = query.data
+
     if data == "menu":
         user_topics.pop(user_id, None)
         user_histories.pop(user_id, None)
@@ -131,6 +147,7 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_main_menu()
         )
         return
+
     if data == "stats":
         stats = user_stats.get(user_id, {})
         total = stats.get("total_messages", 0)
@@ -152,6 +169,38 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
         return
+
+    if data == "news":
+        await query.message.reply_text(
+            "📰 *Live News* — Choose a category!",
+            parse_mode="Markdown",
+            reply_markup=get_news_menu()
+        )
+        return
+
+    if data.startswith("news_"):
+        feed_key = data.replace("news_", "")
+        if feed_key in NEWS_FEEDS:
+            label, url = NEWS_FEEDS[feed_key]
+            await query.message.chat.send_action("typing")
+            headlines = get_news(url)
+            if headlines:
+                await query.message.reply_text(
+                    f"{label}\n*Latest Headlines:*\n\n{headlines}\n\n_Updated just now_ 🔴",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Refresh", callback_data=data)],
+                        [InlineKeyboardButton("📰 News Menu", callback_data="news")],
+                        [InlineKeyboardButton("🏠 Main Menu", callback_data="menu")]
+                    ])
+                )
+            else:
+                await query.message.reply_text(
+                    "⚠️ Couldn't fetch news right now, try again!",
+                    reply_markup=get_news_menu()
+                )
+        return
+
     if data in TOPICS:
         user_topics[user_id] = data
         user_histories[user_id] = []
@@ -184,15 +233,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_histories[user_id] = []
     update_stats(user_id, topic_key)
     await update.message.chat.send_action("typing")
-    if topic_key == "websearch":
-        search_results = web_search(text)
-        if search_results:
-            enhanced = f"User asked: {text}\n\nWeb results:\n{search_results}\n\nAnswer based on these results clearly."
-        else:
-            enhanced = text
-        user_histories[user_id].append({"role": "user", "content": enhanced})
-    else:
-        user_histories[user_id].append({"role": "user", "content": text})
+    user_histories[user_id].append({"role": "user", "content": text})
     reply = ask_groq(topic, user_histories[user_id])
     if reply:
         user_histories[user_id].append({"role": "assistant", "content": reply})
